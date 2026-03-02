@@ -1,0 +1,9 @@
+{
+  "id": "obsync",
+  "name": "Obsync",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Sync your Obsidian vault across devices using Git",
+  "author": "quantarick",
+  "isDesktopOnly": true
+}

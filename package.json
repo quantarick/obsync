@@ -1,0 +1,23 @@
+{
+  "name": "obsync",
+  "version": "1.0.0",
+  "description": "Obsidian vault sync plugin using Git",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production"
+  },
+  "keywords": [
+    "obsidian",
+    "sync",
+    "git"
+  ],
+  "author": "quantarick",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.3.2",
+    "esbuild": "^0.27.3",
+    "obsidian": "^1.12.3",
+    "typescript": "^5.9.3"
+  }
+}
