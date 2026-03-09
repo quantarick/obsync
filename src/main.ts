@@ -57,6 +57,7 @@ export default class ObsyncPlugin extends Plugin {
 				this.settings.githubToken,
 				this.settings.deviceName,
 				this.settings.authorEmail,
+				this.settings.branch,
 			);
 
 			// Sync engine

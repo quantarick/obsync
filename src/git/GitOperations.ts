@@ -13,6 +13,7 @@
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/node";
 import * as fs from "fs";
+import * as path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 
@@ -20,6 +21,20 @@ import { promisify } from "util";
 // execFile runs a system command. We use the system `git` CLI for operations that
 // isomorphic-git can't handle (e.g., Unicode filenames on macOS).
 const execFileAsync = promisify(execFile);
+
+// 📘 INTERFACE: Options for execGit() to control error handling.
+// `allowedExitCodes` lets callers treat certain non-zero exits as non-errors
+// (e.g., exit code 1 from `git merge` means conflicts).
+interface ExecGitOptions {
+	allowedExitCodes?: number[];
+}
+
+// 📘 INTERFACE: Result from execGit(), includes exit code for allowed non-zero exits.
+interface ExecGitResult {
+	stdout: string;
+	stderr: string;
+	exitCode: number;
+}
 
 // 📘 INTERFACE: Defines the shape of a "file status" result.
 // Each field has a type annotation after the colon.
@@ -46,13 +61,15 @@ export class GitOperations {
 	private readonly token: string;
 	private readonly authorName: string;
 	private readonly authorEmail: string;
+	private readonly branch: string;
 
-	constructor(dir: string, remoteUrl: string, token: string, authorName: string, authorEmail: string) {
+	constructor(dir: string, remoteUrl: string, token: string, authorName: string, authorEmail: string, branch: string) {
 		this.dir = dir;
 		this.remoteUrl = remoteUrl;
 		this.token = token;
 		this.authorName = authorName;
 		this.authorEmail = authorEmail || `${authorName}@obsync`;
+		this.branch = branch || "main";
 	}
 
 	// -------------------------------------------------------
@@ -112,11 +129,20 @@ export class GitOperations {
 	// -------------------------------------------------------
 	async commit(message: string): Promise<string> {
 		// 📘 Use system git for commit to avoid isomorphic-git's Unicode tree bug.
-		await this.execGit([
-			"-c", `user.name=${this.authorName}`,
-			"-c", `user.email=${this.authorEmail}`,
-			"commit", "-m", message,
-		]);
+		// Allow exit code 1 — git returns 1 when there's nothing to commit.
+		const result = await this.execGit(
+			[
+				"-c", `user.name=${this.authorName}`,
+				"-c", `user.email=${this.authorEmail}`,
+				"commit", "-m", message,
+			],
+			{ allowedExitCodes: [1] },
+		);
+		if (result.exitCode === 1) {
+			console.log("Obsync: Nothing to commit, working tree clean");
+			const { stdout } = await this.execGit(["rev-parse", "--short", "HEAD"]);
+			return stdout.trim();
+		}
 		const { stdout } = await this.execGit(["rev-parse", "--short", "HEAD"]);
 		const sha = stdout.trim();
 		console.log(`Obsync: Committed ${sha} — ${message}`);
@@ -149,7 +175,7 @@ export class GitOperations {
 	}
 
 	// -------------------------------------------------------
-	// pull() — Fetch and merge remote changes
+	// pull() — Fetch and merge remote changes (pure isomorphic-git)
 	// -------------------------------------------------------
 	async pull(): Promise<{ merged: boolean; conflicts: string[] }> {
 		if (!(await this.hasCommits())) {
@@ -162,7 +188,7 @@ export class GitOperations {
 		}
 
 		try {
-			// Fetch the latest from remote
+			// Fetch the latest from remote (isomorphic-git handles token auth)
 			await git.fetch({
 				fs,
 				http,
@@ -173,55 +199,191 @@ export class GitOperations {
 				}),
 			});
 
-			// Get current branch
-			const branch = await git.currentBranch({
-				fs,
-				dir: this.dir,
-				fullname: false,
-			});
-
-			if (!branch) {
-				console.log("Obsync: No current branch found, skipping pull");
-				return { merged: false, conflicts: [] };
-			}
-
-			// Check if remote branch exists
+			// Check if remote branch exists using isomorphic-git
+			let remoteOid: string;
 			try {
-				await git.resolveRef({
+				remoteOid = await git.resolveRef({
 					fs,
 					dir: this.dir,
-					ref: `refs/remotes/origin/${branch}`,
+					ref: `refs/remotes/origin/${this.branch}`,
 				});
 			} catch {
 				console.log("Obsync: Remote branch not found, nothing to pull");
 				return { merged: false, conflicts: [] };
 			}
 
-			// Try to merge remote changes
+			// Get local HEAD OID
+			const headOid = await git.resolveRef({ fs, dir: this.dir, ref: "HEAD" });
+
+			// Already up to date?
+			if (headOid === remoteOid) {
+				console.log("Obsync: Already up to date");
+				return { merged: false, conflicts: [] };
+			}
+
+			// Try isomorphic-git merge
 			try {
 				await git.merge({
 					fs,
 					dir: this.dir,
-					theirs: `origin/${branch}`,
-					author: {
-						name: this.authorName,
-						email: this.authorEmail,
-					},
+					ours: this.branch,
+					theirs: `remotes/origin/${this.branch}`,
+					author: { name: this.authorName, email: this.authorEmail },
 				});
-				// After merge, checkout to update working directory
-				await git.checkout({ fs, dir: this.dir, ref: branch });
+				await git.checkout({ fs, dir: this.dir, ref: this.branch });
 				console.log("Obsync: Pulled and merged remote changes");
 				return { merged: true, conflicts: [] };
-			} catch (mergeError: unknown) {
-				const msg = mergeError instanceof Error ? mergeError.message : String(mergeError);
-				console.log(`Obsync: Merge issue — ${msg}`);
-				return { merged: false, conflicts: [msg] };
+			} catch (mergeErr) {
+				console.log("Obsync: isomorphic-git merge failed, attempting manual merge");
+				return await this.manualMerge(headOid, remoteOid);
 			}
-		} catch (fetchError: unknown) {
-			const msg = fetchError instanceof Error ? fetchError.message : String(fetchError);
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
 			console.error(`Obsync: Pull failed — ${msg}`);
-			throw fetchError;
+			throw err;
 		}
+	}
+
+	// -------------------------------------------------------
+	// manualMerge() — Three-way merge when isomorphic-git merge fails
+	// -------------------------------------------------------
+	private async manualMerge(
+		headOid: string,
+		remoteOid: string,
+	): Promise<{ merged: boolean; conflicts: string[] }> {
+		// Find common ancestor (may be empty for unrelated histories)
+		let baseOid: string | undefined;
+		try {
+			const bases = await git.findMergeBase({ fs, dir: this.dir, oids: [headOid, remoteOid] });
+			baseOid = bases[0];
+		} catch {
+			baseOid = undefined;
+		}
+
+		// Build filepath → blobOid maps for base, local, and remote
+		const baseMap = baseOid ? await this.getTreeMap(baseOid) : new Map<string, string>();
+		const localMap = await this.getTreeMap(headOid);
+		const remoteMap = await this.getTreeMap(remoteOid);
+
+		// Collect all file paths across all three trees
+		const allPaths = new Set<string>();
+		for (const p of baseMap.keys()) allPaths.add(p);
+		for (const p of localMap.keys()) allPaths.add(p);
+		for (const p of remoteMap.keys()) allPaths.add(p);
+
+		const conflicts: string[] = [];
+		const changedFiles: string[] = [];
+		const deletedFiles: string[] = [];
+
+		for (const filepath of allPaths) {
+			const baseBlob = baseMap.get(filepath);
+			const localBlob = localMap.get(filepath);
+			const remoteBlob = remoteMap.get(filepath);
+
+			// Same on both sides → skip
+			if (localBlob === remoteBlob) continue;
+
+			// Only changed remotely (local same as base)
+			if (localBlob === baseBlob && remoteBlob !== baseBlob) {
+				if (remoteBlob) {
+					await this.writeBlobToFile(filepath, remoteBlob);
+					changedFiles.push(filepath);
+				} else {
+					// Remote deleted the file
+					const fullPath = path.join(this.dir, filepath);
+					if (fs.existsSync(fullPath)) {
+						fs.unlinkSync(fullPath);
+						deletedFiles.push(filepath);
+					}
+				}
+				continue;
+			}
+
+			// Only changed locally (remote same as base) → keep as-is
+			if (remoteBlob === baseBlob && localBlob !== baseBlob) {
+				continue;
+			}
+
+			// Both changed differently
+			if (localBlob && remoteBlob) {
+				// Both modified → write conflict markers
+				await this.writeConflictMarkers(filepath, localBlob, remoteBlob);
+				conflicts.push(filepath);
+			} else {
+				// Deleted one side + changed other → conflict
+				conflicts.push(filepath);
+			}
+		}
+
+		// Write MERGE_HEAD so system git commit creates a merge commit
+		const mergeHeadPath = path.join(this.dir, ".git", "MERGE_HEAD");
+		fs.writeFileSync(mergeHeadPath, remoteOid + "\n");
+
+		if (conflicts.length === 0) {
+			// Stage all changed/deleted files and commit the merge
+			for (const filepath of changedFiles) {
+				await this.add(filepath);
+			}
+			for (const filepath of deletedFiles) {
+				await this.remove(filepath);
+			}
+			await this.commit(`Merge remote branch 'origin/${this.branch}'`);
+			// Clean up MERGE_HEAD if commit didn't remove it
+			if (fs.existsSync(mergeHeadPath)) {
+				fs.unlinkSync(mergeHeadPath);
+			}
+			console.log("Obsync: Manual merge completed successfully");
+			return { merged: true, conflicts: [] };
+		}
+
+		console.log(`Obsync: ${conflicts.length} conflicted file(s): ${conflicts.join(", ")}`);
+		return { merged: false, conflicts };
+	}
+
+	// -------------------------------------------------------
+	// getTreeMap() — Walk a commit tree, return filepath → blobOid map
+	// -------------------------------------------------------
+	private async getTreeMap(commitOid: string): Promise<Map<string, string>> {
+		const fileMap = new Map<string, string>();
+		await git.walk({
+			fs,
+			dir: this.dir,
+			trees: [git.TREE({ ref: commitOid })],
+			map: async (filepath, [entry]) => {
+				if (filepath === "." || !entry) return undefined;
+				const type = await entry.type();
+				if (type === "blob") {
+					const oid = await entry.oid();
+					if (oid) fileMap.set(filepath, oid);
+				}
+				return undefined;
+			},
+		});
+		return fileMap;
+	}
+
+	// -------------------------------------------------------
+	// writeBlobToFile() — Read a blob and write it to working directory
+	// -------------------------------------------------------
+	private async writeBlobToFile(filepath: string, blobOid: string): Promise<void> {
+		const { blob } = await git.readBlob({ fs, dir: this.dir, oid: blobOid });
+		const fullPath = path.join(this.dir, filepath);
+		fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+		fs.writeFileSync(fullPath, Buffer.from(blob));
+	}
+
+	// -------------------------------------------------------
+	// writeConflictMarkers() — Write a file with conflict markers
+	// -------------------------------------------------------
+	private async writeConflictMarkers(filepath: string, localOid: string, remoteOid: string): Promise<void> {
+		const { blob: localBlob } = await git.readBlob({ fs, dir: this.dir, oid: localOid });
+		const { blob: remoteBlob } = await git.readBlob({ fs, dir: this.dir, oid: remoteOid });
+		const localContent = Buffer.from(localBlob).toString("utf8");
+		const remoteContent = Buffer.from(remoteBlob).toString("utf8");
+		const conflicted = `<<<<<<< LOCAL\n${localContent}\n=======\n${remoteContent}\n>>>>>>> REMOTE\n`;
+		const fullPath = path.join(this.dir, filepath);
+		fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+		fs.writeFileSync(fullPath, conflicted);
 	}
 
 	// -------------------------------------------------------
@@ -311,7 +473,7 @@ export class GitOperations {
 	// -------------------------------------------------------
 	// execGit() — Run a system git command
 	// -------------------------------------------------------
-	private async execGit(args: string[]): Promise<{ stdout: string; stderr: string }> {
+	private async execGit(args: string[], options?: ExecGitOptions): Promise<ExecGitResult> {
 		console.log(`Obsync: execGit cwd="${this.dir}" args=${JSON.stringify(args)}`);
 		try {
 			const result = await execFileAsync("git", args, {
@@ -319,11 +481,19 @@ export class GitOperations {
 				env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
 				timeout: 30000,
 			});
-			return result;
+			return { stdout: result.stdout, stderr: result.stderr, exitCode: 0 };
 		} catch (err: unknown) {
-			const msg = err instanceof Error ? err.message : String(err);
+			// Check if the exit code is in the allowed list
+			const exitCode = (err as { code?: number }).code;
+			if (typeof exitCode === "number" && options?.allowedExitCodes?.includes(exitCode)) {
+				const stdout = (err as { stdout?: string }).stdout ?? "";
+				const stderr = (err as { stderr?: string }).stderr ?? "";
+				return { stdout, stderr, exitCode };
+			}
+			const stderr = (err as { stderr?: string }).stderr ?? "";
+			const msg = stderr.trim() || (err instanceof Error ? err.message : String(err));
 			console.error(`Obsync: execGit failed — ${msg}`);
-			throw err;
+			throw new Error(msg);
 		}
 	}
 }

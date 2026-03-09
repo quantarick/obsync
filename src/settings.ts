@@ -42,6 +42,9 @@ export interface ObsyncSettings {
 	// Git author email for commits
 	authorEmail: string;
 
+	// Git branch to sync with
+	branch: string;
+
 	// How to handle merge conflicts
 	mergeStrategy: MergeStrategy;
 
@@ -66,6 +69,7 @@ export const DEFAULT_SETTINGS: ObsyncSettings = {
 	githubToken: "",
 	deviceName: getDefaultDeviceName(),
 	authorEmail: "",
+	branch: "main",
 	mergeStrategy: MergeStrategy.APPEND_BOTH,
 	pullIntervalSeconds: 30,
 	debounceSeconds: 3,
@@ -131,6 +135,20 @@ export class ObsyncSettingTab extends PluginSettingTab {
 						// Called whenever the user types in this field.
 						// `value` is automatically typed as `string` by TypeScript.
 						this.plugin.settings.remoteUrl = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// --- Branch ---
+		new Setting(containerEl)
+			.setName("Branch")
+			.setDesc("Git branch to sync with (e.g., main or master)")
+			.addText((text) =>
+				text
+					.setPlaceholder("main")
+					.setValue(this.plugin.settings.branch)
+					.onChange(async (value) => {
+						this.plugin.settings.branch = value;
 						await this.plugin.saveSettings();
 					})
 			);
