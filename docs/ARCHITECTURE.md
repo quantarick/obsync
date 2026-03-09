@@ -189,7 +189,9 @@ Obsidian-native settings panel:
 | Setting | Default | Description |
 |---|---|---|
 | Remote URL | *(required)* | GitHub repo URL |
+| GitHub Token | *(required)* | Personal access token for authentication |
 | Device Name | *(auto-detected)* | Identifies this machine in sync commits |
+| Author Email | *(optional)* | Email used in git commits |
 | Merge Strategy | Append both | How to resolve conflicts |
 | Pull Interval | 30 seconds | How often to check for remote changes |
 | Debounce Delay | 3 seconds | Wait time before committing after a change |
@@ -212,32 +214,46 @@ Displays sync state in Obsidian's status bar:
 | Language | TypeScript | Required for Obsidian plugins |
 | Runtime | Node.js (via Obsidian's Electron) | Built into Obsidian |
 | Build | esbuild | Standard for Obsidian plugins, fast bundling |
-| Git operations | isomorphic-git | Pure JS Git implementation, works in Node.js |
+| Git (network ops) | isomorphic-git | Pure JS Git for push/pull/fetch/status/log |
+| Git (local ops) | System `git` CLI via `child_process` | For init/add/commit — avoids isomorphic-git's Unicode bug on macOS |
 | HTTP transport | isomorphic-git + `http` module | For pushing/pulling over HTTPS |
-| Auth | GitHub personal access token | Stored in plugin settings (encrypted) |
+| Auth | GitHub personal access token | Stored in plugin settings (Obsidian data) |
 | File watching | Obsidian Vault events API | `vault.on('modify'/'create'/'delete')` |
+
+### Why two Git implementations?
+
+isomorphic-git has a known bug with **Unicode filenames** (Chinese, Japanese, etc.) on macOS. The macOS filesystem uses NFD normalization for paths, but isomorphic-git's internal path resolver returns `null` for these paths, causing crashes during `add()` and `commit()`.
+
+**Solution:** We use the system `git` CLI (via Node.js `child_process.execFile`) for operations that touch the working tree (init, add, remove, commit), and isomorphic-git for network operations (push, pull, fetch) and read-only queries (status, log). The `isRepo()` and `hasCommits()` checks also use system git for consistency.
+
+This means **system `git` must be installed** on the machine. This is already the case on macOS (ships with Xcode CLI tools) and most dev setups on Windows (Git for Windows).
 
 ## Project Structure
 
 ```
 obsync/
 ├── docs/
-│   └── ARCHITECTURE.md          # This document
+│   ├── ARCHITECTURE.md          # This document
+│   └── IMPLEMENTATION_PLAN.md   # Build phases
 ├── src/
 │   ├── main.ts                  # Plugin entry point
-│   ├── settings.ts              # Settings tab UI + model
+│   ├── settings.ts              # Settings interface + UI panel
+│   ├── git/
+│   │   └── GitOperations.ts     # Git wrapper (isomorphic-git + system git)
 │   ├── sync/
 │   │   ├── SyncEngine.ts        # Orchestrates commit/push/pull
-│   │   ├── ConflictResolver.ts  # Automatic merge strategy handler
-│   │   └── Debouncer.ts         # Batches rapid file changes
-│   ├── git/
-│   │   └── GitOperations.ts     # isomorphic-git wrapper
+│   │   ├── ConflictResolver.ts  # Auto merge strategy handler
+│   │   ├── Debouncer.ts         # Batches rapid file changes
+│   │   └── FileWatcher.ts       # Watches Obsidian vault events
 │   └── ui/
-│       └── StatusBar.ts         # Status bar component
+│       ├── StatusBar.ts         # Clickable status bar component
+│       └── SyncHistoryModal.ts  # Commit history modal dialog
 ├── manifest.json                # Obsidian plugin manifest
+├── styles.css                   # Plugin CSS (status bar colors)
 ├── package.json
 ├── tsconfig.json
 ├── esbuild.config.mjs
+├── vault-gitignore-template     # Recommended .gitignore for vaults
 └── .gitignore
 ```
 
@@ -252,6 +268,8 @@ obsync/
 | Network failures | Retry with exponential backoff; queue commits locally until connectivity returns |
 | GitHub token security | Stored in Obsidian's plugin data (encrypted at rest by OS keychain) |
 | `isomorphic-git` performance on large vaults | Incremental operations; only stage changed files, not full `git add .` |
+| `isomorphic-git` Unicode crash on macOS | Use system `git` CLI for init/add/commit; isomorphic-git for network ops |
+| System `git` required | Ships with macOS (Xcode CLI tools) and Git for Windows; documented as prerequisite |
 
 ## Future Enhancements
 
