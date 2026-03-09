@@ -19,5 +19,8 @@
     "esbuild": "^0.27.3",
     "obsidian": "^1.12.3",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "isomorphic-git": "^1.37.2"
   }
 }

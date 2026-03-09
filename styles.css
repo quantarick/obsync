@@ -1,0 +1,79 @@
+/* ============================================================
+   Obsync — Plugin Styles
+   ============================================================
+   Obsidian loads styles.css automatically from the plugin folder.
+   We use CSS variables from Obsidian's theme (var(--...)) so our
+   styles adapt to light/dark themes automatically.
+   ============================================================ */
+
+/* Status bar item */
+.obsync-status-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* State-specific colors */
+.obsync-idle {
+  color: var(--text-success, #28a745);
+}
+
+.obsync-pushing,
+.obsync-pulling {
+  color: var(--text-accent, #007AFF);
+}
+
+.obsync-error {
+  color: var(--text-error, #dc3545);
+}
+
+.obsync-paused {
+  color: var(--text-muted);
+}
+
+/* Sync history modal */
+.obsync-history-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.obsync-history-entry {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.obsync-history-entry:last-child {
+  border-bottom: none;
+}
+
+.obsync-history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.obsync-sha {
+  font-size: 0.85em;
+  color: var(--text-accent);
+}
+
+.obsync-date {
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+
+.obsync-message {
+  margin-bottom: 2px;
+}
+
+.obsync-author {
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
+.obsync-empty-state {
+  color: var(--text-muted);
+  text-align: center;
+  padding: 20px;
+}

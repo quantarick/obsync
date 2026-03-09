@@ -1,0 +1,17 @@
+# Obsync — Recommended .gitignore for your Obsidian vault
+# Copy this file to your vault as `.gitignore`
+
+# Obsidian UI state (changes on every click/resize — very noisy)
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+
+# Obsidian cache
+.obsidian/cache
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Trash
+.trash/
