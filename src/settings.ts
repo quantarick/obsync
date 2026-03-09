@@ -75,8 +75,7 @@ export const DEFAULT_SETTINGS: ObsyncSettings = {
 	debounceSeconds: 3,
 	autoSyncOnStartup: true,
 	ignoredPatterns: [
-		".obsidian/workspace.json",
-		".obsidian/workspace-mobile.json",
+		".obsidian/",
 		".DS_Store",
 		"Thumbs.db",
 	],
