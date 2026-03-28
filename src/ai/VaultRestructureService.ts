@@ -9,7 +9,7 @@
 
 import { Vault, MetadataCache } from "obsidian";
 import { callClaude } from "./ClaudeClient";
-import { analyzeVault, formatMetadataForPrompt } from "./VaultAnalyzer";
+import { analyzeVault, analyzeFolder, formatMetadataForPrompt } from "./VaultAnalyzer";
 import { VaultPlan, parsePlan } from "./VaultRestructurePlan";
 import type { AiSettings } from "./RestructureService";
 
@@ -97,6 +97,40 @@ export class VaultRestructureService {
 			model: settings.claudeModel,
 			systemPrompt: PLAN_SYSTEM_PROMPT,
 			userContent: metadata,
+			maxTokens: 16384,
+		});
+
+		return parsePlan(response.content);
+	}
+
+	/**
+	 * Phase 1b: Analyze a single folder and generate a restructuring plan.
+	 */
+	async generateFolderPlan(
+		vault: Vault,
+		metadataCache: MetadataCache,
+		folderPath: string,
+	): Promise<VaultPlan> {
+		const settings = this.getSettings();
+		const apiKey = await this.requireApiKey(settings);
+
+		const notes = await analyzeFolder(vault, metadataCache, folderPath);
+		if (notes.length === 0) {
+			throw new Error(`No markdown notes found in folder: ${folderPath}`);
+		}
+
+		const metadata = formatMetadataForPrompt(notes);
+		const scopeNote = `\n\nIMPORTANT: You are reorganizing ONLY the folder "${folderPath}". ` +
+			`All proposed operations should keep files within this folder unless there is a strong reason to move them elsewhere. ` +
+			`Do not propose changes to files outside this folder.`;
+
+		console.log(`Obsync: Folder analysis — ${notes.length} notes in "${folderPath}", ~${Math.ceil(metadata.length / 4)} tokens`);
+
+		const response = await callClaude({
+			apiKey,
+			model: settings.claudeModel,
+			systemPrompt: PLAN_SYSTEM_PROMPT,
+			userContent: metadata + scopeNote,
 			maxTokens: 16384,
 		});
 

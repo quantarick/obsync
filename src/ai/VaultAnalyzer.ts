@@ -24,6 +24,27 @@ export async function analyzeVault(
 	metadataCache: MetadataCache,
 ): Promise<NoteMeta[]> {
 	const files = vault.getMarkdownFiles();
+	return collectNotes(vault, metadataCache, files);
+}
+
+/**
+ * Analyze markdown files within a specific folder (non-recursive: only direct children).
+ */
+export async function analyzeFolder(
+	vault: Vault,
+	metadataCache: MetadataCache,
+	folderPath: string,
+): Promise<NoteMeta[]> {
+	const prefix = folderPath.endsWith("/") ? folderPath : folderPath + "/";
+	const files = vault.getMarkdownFiles().filter((f) => f.path.startsWith(prefix));
+	return collectNotes(vault, metadataCache, files);
+}
+
+async function collectNotes(
+	vault: Vault,
+	metadataCache: MetadataCache,
+	files: TFile[],
+): Promise<NoteMeta[]> {
 	const notes: NoteMeta[] = [];
 
 	for (const file of files) {

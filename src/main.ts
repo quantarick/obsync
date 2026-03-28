@@ -13,7 +13,6 @@ import { FileWatcher } from "./sync/FileWatcher";
 import { SyncEngine, SyncState } from "./sync/SyncEngine";
 import { StatusBar } from "./ui/StatusBar";
 import { SyncHistoryModal } from "./ui/SyncHistoryModal";
-import { SecureStorage } from "./SecureStorage";
 import { RestructureService } from "./ai/RestructureService";
 import { VaultRestructureService } from "./ai/VaultRestructureService";
 import { executePlan } from "./ai/PlanExecutor";
@@ -24,7 +23,6 @@ import { LoadingModal } from "./ui/LoadingModal";
 export default class ObsyncPlugin extends Plugin {
 	settings!: ObsyncSettings;
 	git!: GitOperations;
-	secureStorage!: SecureStorage;
 	private restructureService!: RestructureService;
 	private vaultRestructureService!: VaultRestructureService;
 	private debouncer: Debouncer | null = null;
@@ -36,9 +34,8 @@ export default class ObsyncPlugin extends Plugin {
 	async onload(): Promise<void> {
 		console.log("Obsync: Plugin loaded");
 
-		this.secureStorage = new SecureStorage(this.manifest.id);
 		const getAiSettings = () => this.settings;
-		const getAiKey = () => this.secureStorage.loadSecret("claudeApiKey");
+		const getAiKey = () => Promise.resolve(this.app.secretStorage.getSecret("claude-api-key"));
 		this.restructureService = new RestructureService(getAiSettings, getAiKey);
 		this.vaultRestructureService = new VaultRestructureService(getAiSettings, getAiKey);
 
@@ -280,6 +277,12 @@ export default class ObsyncPlugin extends Plugin {
 			callback: () => this.runVaultRestructure(),
 		});
 
+		this.addCommand({
+			id: "obsync-restructure-folder",
+			name: "Restructure current folder with AI",
+			callback: () => this.runFolderRestructure(),
+		});
+
 		console.log("Obsync: Plugin ready");
 	}
 
@@ -354,6 +357,60 @@ export default class ObsyncPlugin extends Plugin {
 		}
 	}
 
+	private async runFolderRestructure(): Promise<void> {
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile || !activeFile.parent) {
+			new Notice("Obsync: Open a note inside a folder first");
+			return;
+		}
+
+		const folderPath = activeFile.parent.path;
+		if (folderPath === "/") {
+			new Notice("Obsync: Active note is at vault root. Use 'Restructure vault with AI' instead.");
+			return;
+		}
+
+		const loading = new LoadingModal(this.app, `Analyzing folder "${folderPath}"...`);
+		loading.open();
+
+		try {
+			const plan = await this.vaultRestructureService.generateFolderPlan(
+				this.app.vault,
+				this.app.metadataCache,
+				folderPath,
+			);
+			loading.dismiss();
+
+			if (plan.operations.length === 0) {
+				new Notice("Obsync: Folder is already well-organized. No changes proposed.", 5000);
+				return;
+			}
+
+			new VaultRestructureModal(this.app, plan, async (selectedOps) => {
+				const report = await executePlan(
+					this.app,
+					selectedOps,
+					this.vaultRestructureService,
+					(msg) => console.log(`Obsync: ${msg}`),
+				);
+
+				const summary =
+					`Obsync: ${report.succeeded} operation(s) succeeded` +
+					(report.failed > 0 ? `, ${report.failed} failed` : "");
+				new Notice(summary, 8000);
+
+				if (report.errors.length > 0) {
+					console.error("Obsync: Folder restructure errors:", report.errors);
+				}
+			}).open();
+		} catch (err: unknown) {
+			loading.dismiss();
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Obsync: ${msg}`, 10000);
+			console.error(`Obsync: Folder restructure failed — ${msg}`);
+		}
+	}
+
 	private async triggerSync(): Promise<void> {
 		if (!this.git || !this.syncEngine) {
 			new Notice("Obsync: Not initialized — configure Remote URL and Token in settings");
@@ -377,48 +434,39 @@ export default class ObsyncPlugin extends Plugin {
 		const data = await this.loadData() || {};
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
 
-		// Load token from secure storage (keychain)
-		const secureToken = await this.secureStorage.loadSecret("githubToken");
+		// Load secrets from Obsidian's native secret storage
+		const secureToken = this.app.secretStorage.getSecret("github-token");
 		if (secureToken) {
 			this.settings.githubToken = secureToken;
 		}
 
-		// Migrate: if token exists in data.json but not in secure storage, migrate it
-		if (data.githubToken && !secureToken) {
-			console.log("Obsync: Migrating GitHub token from data.json to secure storage");
-			await this.secureStorage.saveSecret("githubToken", data.githubToken);
-			delete data.githubToken;
-			await this.saveData(data);
-		}
-
-		// Load Claude API key from keychain
-		const secureClaudeKey = await this.secureStorage.loadSecret("claudeApiKey");
+		const secureClaudeKey = this.app.secretStorage.getSecret("claude-api-key");
 		if (secureClaudeKey) {
 			this.settings.claudeApiKey = secureClaudeKey;
 		}
 
-		// Migrate Claude key from data.json if needed
+		// Migrate secrets from data.json to native secret storage
+		if (data.githubToken && !secureToken) {
+			console.log("Obsync: Migrating GitHub token from data.json to secret storage");
+			this.app.secretStorage.setSecret("github-token", data.githubToken);
+			delete data.githubToken;
+			await this.saveData(data);
+		}
 		if (data.claudeApiKey && !secureClaudeKey) {
-			console.log("Obsync: Migrating Claude API key from data.json to secure storage");
-			await this.secureStorage.saveSecret("claudeApiKey", data.claudeApiKey);
+			console.log("Obsync: Migrating Claude API key from data.json to secret storage");
+			this.app.secretStorage.setSecret("claude-api-key", data.claudeApiKey);
 			delete data.claudeApiKey;
 			await this.saveData(data);
 		}
 	}
 
 	async saveSettings(): Promise<void> {
-		// Save token to secure storage, not data.json
+		// Save secrets to Obsidian's native secret storage
 		if (this.settings.githubToken) {
-			await this.secureStorage.saveSecret("githubToken", this.settings.githubToken);
-		} else {
-			await this.secureStorage.deleteSecret("githubToken");
+			this.app.secretStorage.setSecret("github-token", this.settings.githubToken);
 		}
-
-		// Save Claude API key to keychain
 		if (this.settings.claudeApiKey) {
-			await this.secureStorage.saveSecret("claudeApiKey", this.settings.claudeApiKey);
-		} else {
-			await this.secureStorage.deleteSecret("claudeApiKey");
+			this.app.secretStorage.setSecret("claude-api-key", this.settings.claudeApiKey);
 		}
 
 		// Save everything except secrets to data.json

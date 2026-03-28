@@ -66,7 +66,7 @@ export interface ObsyncSettings {
 	// Whether AI features are enabled
 	aiEnabled: boolean;
 
-	// Claude API key (stored in OS keychain, not in data.json)
+	// Claude API key (stored in Obsidian secret storage, not in data.json)
 	claudeApiKey: string;
 
 	// Claude model to use for restructuring
@@ -174,7 +174,7 @@ export class ObsyncSettingTab extends PluginSettingTab {
 		// --- GitHub Token ---
 		new Setting(containerEl)
 			.setName("GitHub token")
-			.setDesc("Personal access token — stored in OS keychain (not in vault files)")
+			.setDesc("Personal access token — stored in Obsidian secret storage (not in vault files)")
 			.addText((text) =>
 				text
 					.setPlaceholder("ghp_xxxxxxxxxxxx")
@@ -332,7 +332,7 @@ export class ObsyncSettingTab extends PluginSettingTab {
 		// --- Claude API Key ---
 		new Setting(containerEl)
 			.setName("Claude API key")
-			.setDesc("Anthropic API key — stored in OS keychain (not in vault files)")
+			.setDesc("Anthropic API key — stored in Obsidian secret storage (not in vault files)")
 			.addText((text) =>
 				text
 					.setPlaceholder("sk-ant-...")
