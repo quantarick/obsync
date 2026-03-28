@@ -1,7 +1,7 @@
 // ============================================================
 // Obsync — Main Plugin Entry Point
 // ============================================================
-import { Plugin, Notice } from "obsidian";
+import { Plugin, Notice, Editor, MarkdownView } from "obsidian";
 import {
 	ObsyncSettings,
 	DEFAULT_SETTINGS,
@@ -13,10 +13,20 @@ import { FileWatcher } from "./sync/FileWatcher";
 import { SyncEngine, SyncState } from "./sync/SyncEngine";
 import { StatusBar } from "./ui/StatusBar";
 import { SyncHistoryModal } from "./ui/SyncHistoryModal";
+import { SecureStorage } from "./SecureStorage";
+import { RestructureService } from "./ai/RestructureService";
+import { VaultRestructureService } from "./ai/VaultRestructureService";
+import { executePlan } from "./ai/PlanExecutor";
+import { RestructurePreviewModal } from "./ui/RestructurePreviewModal";
+import { VaultRestructureModal } from "./ui/VaultRestructureModal";
+import { LoadingModal } from "./ui/LoadingModal";
 
 export default class ObsyncPlugin extends Plugin {
 	settings!: ObsyncSettings;
 	git!: GitOperations;
+	secureStorage!: SecureStorage;
+	private restructureService!: RestructureService;
+	private vaultRestructureService!: VaultRestructureService;
 	private debouncer: Debouncer | null = null;
 	private fileWatcher: FileWatcher | null = null;
 	private syncEngine: SyncEngine | null = null;
@@ -25,6 +35,12 @@ export default class ObsyncPlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		console.log("Obsync: Plugin loaded");
+
+		this.secureStorage = new SecureStorage(this.manifest.id);
+		const getAiSettings = () => this.settings;
+		const getAiKey = () => this.secureStorage.loadSecret("claudeApiKey");
+		this.restructureService = new RestructureService(getAiSettings, getAiKey);
+		this.vaultRestructureService = new VaultRestructureService(getAiSettings, getAiKey);
 
 		try {
 			await this.loadSettings();
@@ -230,6 +246,40 @@ export default class ObsyncPlugin extends Plugin {
 			},
 		});
 
+		// ========================
+		// AI RESTRUCTURE COMMANDS
+		// ========================
+		this.addCommand({
+			id: "obsync-restructure-note",
+			name: "Restructure entire note with AI",
+			editorCallback: (editor: Editor, view: MarkdownView) => {
+				this.runRestructure(editor, editor.getValue(), (result) => {
+					editor.setValue(result);
+				});
+			},
+		});
+
+		this.addCommand({
+			id: "obsync-restructure-selection",
+			name: "Restructure selection with AI",
+			editorCallback: (editor: Editor, view: MarkdownView) => {
+				const selection = editor.getSelection();
+				if (!selection || selection.trim().length === 0) {
+					new Notice("Obsync: Select some text first");
+					return;
+				}
+				this.runRestructure(editor, selection, (result) => {
+					editor.replaceSelection(result);
+				});
+			},
+		});
+
+		this.addCommand({
+			id: "obsync-restructure-vault",
+			name: "Restructure vault with AI",
+			callback: () => this.runVaultRestructure(),
+		});
+
 		console.log("Obsync: Plugin ready");
 	}
 
@@ -238,6 +288,70 @@ export default class ObsyncPlugin extends Plugin {
 		// Safe cleanup — each component might be null if init failed partway
 		if (this.fileWatcher) this.fileWatcher.stop();
 		if (this.syncEngine) this.syncEngine.cleanup();
+	}
+
+	private async runRestructure(
+		editor: Editor,
+		content: string,
+		applyResult: (restructured: string) => void,
+	): Promise<void> {
+		const loading = new LoadingModal(this.app, "Restructuring note with Claude...");
+		loading.open();
+
+		try {
+			const result = await this.restructureService.restructure(content);
+			loading.dismiss();
+			new RestructurePreviewModal(this.app, result, () => {
+				applyResult(result.restructured);
+				new Notice("Obsync: Note restructured", 3000);
+			}).open();
+		} catch (err: unknown) {
+			loading.dismiss();
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Obsync: ${msg}`, 10000);
+			console.error(`Obsync: Restructure failed — ${msg}`);
+		}
+	}
+
+	private async runVaultRestructure(): Promise<void> {
+		const loading = new LoadingModal(this.app, "Analyzing vault and generating plan...");
+		loading.open();
+
+		try {
+			const plan = await this.vaultRestructureService.generatePlan(
+				this.app.vault,
+				this.app.metadataCache,
+			);
+			loading.dismiss();
+
+			if (plan.operations.length === 0) {
+				new Notice("Obsync: Vault is already well-organized. No changes proposed.", 5000);
+				return;
+			}
+
+			new VaultRestructureModal(this.app, plan, async (selectedOps) => {
+				const report = await executePlan(
+					this.app,
+					selectedOps,
+					this.vaultRestructureService,
+					(msg) => console.log(`Obsync: ${msg}`),
+				);
+
+				const summary =
+					`Obsync: ${report.succeeded} operation(s) succeeded` +
+					(report.failed > 0 ? `, ${report.failed} failed` : "");
+				new Notice(summary, 8000);
+
+				if (report.errors.length > 0) {
+					console.error("Obsync: Vault restructure errors:", report.errors);
+				}
+			}).open();
+		} catch (err: unknown) {
+			loading.dismiss();
+			const msg = err instanceof Error ? err.message : String(err);
+			new Notice(`Obsync: ${msg}`, 10000);
+			console.error(`Obsync: Vault restructure failed — ${msg}`);
+		}
 	}
 
 	private async triggerSync(): Promise<void> {
@@ -260,10 +374,57 @@ export default class ObsyncPlugin extends Plugin {
 	}
 
 	async loadSettings(): Promise<void> {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const data = await this.loadData() || {};
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+
+		// Load token from secure storage (keychain)
+		const secureToken = await this.secureStorage.loadSecret("githubToken");
+		if (secureToken) {
+			this.settings.githubToken = secureToken;
+		}
+
+		// Migrate: if token exists in data.json but not in secure storage, migrate it
+		if (data.githubToken && !secureToken) {
+			console.log("Obsync: Migrating GitHub token from data.json to secure storage");
+			await this.secureStorage.saveSecret("githubToken", data.githubToken);
+			delete data.githubToken;
+			await this.saveData(data);
+		}
+
+		// Load Claude API key from keychain
+		const secureClaudeKey = await this.secureStorage.loadSecret("claudeApiKey");
+		if (secureClaudeKey) {
+			this.settings.claudeApiKey = secureClaudeKey;
+		}
+
+		// Migrate Claude key from data.json if needed
+		if (data.claudeApiKey && !secureClaudeKey) {
+			console.log("Obsync: Migrating Claude API key from data.json to secure storage");
+			await this.secureStorage.saveSecret("claudeApiKey", data.claudeApiKey);
+			delete data.claudeApiKey;
+			await this.saveData(data);
+		}
 	}
 
 	async saveSettings(): Promise<void> {
-		await this.saveData(this.settings);
+		// Save token to secure storage, not data.json
+		if (this.settings.githubToken) {
+			await this.secureStorage.saveSecret("githubToken", this.settings.githubToken);
+		} else {
+			await this.secureStorage.deleteSecret("githubToken");
+		}
+
+		// Save Claude API key to keychain
+		if (this.settings.claudeApiKey) {
+			await this.secureStorage.saveSecret("claudeApiKey", this.settings.claudeApiKey);
+		} else {
+			await this.secureStorage.deleteSecret("claudeApiKey");
+		}
+
+		// Save everything except secrets to data.json
+		const dataToSave = Object.assign({}, this.settings);
+		delete (dataToSave as any).githubToken;
+		delete (dataToSave as any).claudeApiKey;
+		await this.saveData(dataToSave);
 	}
 }

@@ -276,6 +276,9 @@ export class GitOperations {
 		const deletedFiles: string[] = [];
 
 		for (const filepath of allPaths) {
+			// Never touch .obsidian/ during merge — protects plugin state and config
+			if (GitOperations.isProtectedPath(filepath)) continue;
+
 			const baseBlob = baseMap.get(filepath);
 			const localBlob = localMap.get(filepath);
 			const remoteBlob = remoteMap.get(filepath);
@@ -393,7 +396,9 @@ export class GitOperations {
 		const matrix = await git.statusMatrix({
 			fs,
 			dir: this.dir,
-			filter: (f: string) => !f.startsWith(".git/") && f !== ".git",
+			filter: (f: string) =>
+				!f.startsWith(".git/") && f !== ".git" &&
+				!GitOperations.isProtectedPath(f),
 		});
 
 		const results: FileStatus[] = [];
@@ -468,6 +473,63 @@ export class GitOperations {
 		if (this.remoteUrl) {
 			await this.addRemote();
 		}
+		// Ensure .obsidian/ is gitignored to prevent plugin/config corruption
+		await this.ensureGitignore();
+	}
+
+	// -------------------------------------------------------
+	// ensureGitignore() — Create/update .gitignore to exclude .obsidian/
+	// -------------------------------------------------------
+	// Without this, git operations (checkout, merge) can overwrite
+	// .obsidian/community-plugins.json (disabling the plugin) and
+	// .obsidian/plugins/obsync/data.json (losing all settings).
+	private async ensureGitignore(): Promise<void> {
+		const gitignorePath = path.join(this.dir, ".gitignore");
+		const requiredEntries = [".obsidian/", ".DS_Store", "Thumbs.db"];
+
+		let content = "";
+		if (fs.existsSync(gitignorePath)) {
+			content = fs.readFileSync(gitignorePath, "utf-8");
+		}
+
+		const lines = content.split("\n");
+		const missingEntries = requiredEntries.filter(
+			(entry) => !lines.some((line) => line.trim() === entry)
+		);
+
+		if (missingEntries.length > 0) {
+			const addition = (content && !content.endsWith("\n") ? "\n" : "") +
+				"# Obsync: prevent git from overwriting Obsidian config\n" +
+				missingEntries.join("\n") + "\n";
+			fs.writeFileSync(gitignorePath, content + addition, "utf-8");
+			console.log(`Obsync: Added ${missingEntries.join(", ")} to .gitignore`);
+		}
+
+		// If .obsidian/ is already tracked in git, untrack it (keeps files on disk)
+		try {
+			const { stdout } = await this.execGit(
+				["ls-files", "--cached", ".obsidian/"],
+			);
+			if (stdout.trim().length > 0) {
+				console.log("Obsync: Removing .obsidian/ from git tracking (files kept on disk)");
+				await this.execGit(["rm", "-r", "--cached", ".obsidian/"]);
+				await this.execGit([
+					"-c", `user.name=${this.authorName}`,
+					"-c", `user.email=${this.authorEmail}`,
+					"commit", "-m", "chore: untrack .obsidian/ to prevent config corruption",
+				], { allowedExitCodes: [1] });
+			}
+		} catch (err) {
+			// Non-fatal — the .gitignore will prevent future tracking
+			console.log("Obsync: Could not untrack .obsidian/ (may not be tracked)");
+		}
+	}
+
+	// -------------------------------------------------------
+	// isObsidianPath() — Check if a path is inside .obsidian/
+	// -------------------------------------------------------
+	private static isProtectedPath(filepath: string): boolean {
+		return filepath.startsWith(".obsidian/") || filepath === ".obsidian";
 	}
 
 	// -------------------------------------------------------

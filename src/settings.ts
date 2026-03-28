@@ -12,6 +12,7 @@
 
 import { App, PluginSettingTab, Setting } from "obsidian";
 
+
 // We need a reference to our plugin class, but importing it directly
 // would create a circular dependency. Instead, we import just the type.
 import type ObsyncPlugin from "./main";
@@ -59,6 +60,20 @@ export interface ObsyncSettings {
 
 	// File patterns to exclude from sync
 	ignoredPatterns: string[];
+
+	// --- AI Restructure ---
+
+	// Whether AI features are enabled
+	aiEnabled: boolean;
+
+	// Claude API key (stored in OS keychain, not in data.json)
+	claudeApiKey: string;
+
+	// Claude model to use for restructuring
+	claudeModel: string;
+
+	// Custom system prompt (empty = use built-in default)
+	customSystemPrompt: string;
 }
 
 // 📘 DEFAULT VALUES: A constant object that satisfies the ObsyncSettings interface.
@@ -79,6 +94,10 @@ export const DEFAULT_SETTINGS: ObsyncSettings = {
 		".DS_Store",
 		"Thumbs.db",
 	],
+	aiEnabled: false,
+	claudeApiKey: "",
+	claudeModel: "claude-sonnet-4-20250514",
+	customSystemPrompt: "",
 };
 
 // 📘 FUNCTION: A standalone function (not inside a class).
@@ -155,7 +174,7 @@ export class ObsyncSettingTab extends PluginSettingTab {
 		// --- GitHub Token ---
 		new Setting(containerEl)
 			.setName("GitHub token")
-			.setDesc("Personal access token for authentication (stored locally)")
+			.setDesc("Personal access token — stored in OS keychain (not in vault files)")
 			.addText((text) =>
 				text
 					.setPlaceholder("ghp_xxxxxxxxxxxx")
@@ -288,6 +307,71 @@ export class ObsyncSettingTab extends PluginSettingTab {
 							.split(",")
 							.map((s) => s.trim())
 							.filter((s) => s.length > 0);
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// ========================
+		// AI RESTRUCTURE SETTINGS
+		// ========================
+		containerEl.createEl("h2", { text: "AI Restructure" });
+
+		// --- Enable AI ---
+		new Setting(containerEl)
+			.setName("Enable AI features")
+			.setDesc("Allow AI-powered note restructuring using Claude")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.aiEnabled)
+					.onChange(async (value) => {
+						this.plugin.settings.aiEnabled = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// --- Claude API Key ---
+		new Setting(containerEl)
+			.setName("Claude API key")
+			.setDesc("Anthropic API key — stored in OS keychain (not in vault files)")
+			.addText((text) =>
+				text
+					.setPlaceholder("sk-ant-...")
+					.setValue(this.plugin.settings.claudeApiKey)
+					.onChange(async (value) => {
+						this.plugin.settings.claudeApiKey = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// --- Claude Model ---
+		new Setting(containerEl)
+			.setName("Claude model")
+			.setDesc("Which Claude model to use for restructuring")
+			.addDropdown((dropdown) => {
+				const options: Record<string, string> = {
+					"claude-sonnet-4-20250514": "Claude Sonnet 4 (recommended)",
+					"claude-opus-4-20250514": "Claude Opus 4 (most capable)",
+					"claude-haiku-4-5-20251001": "Claude Haiku 4.5 (fastest)",
+				};
+				dropdown
+					.addOptions(options)
+					.setValue(this.plugin.settings.claudeModel)
+					.onChange(async (value) => {
+						this.plugin.settings.claudeModel = value;
+						await this.plugin.saveSettings();
+					});
+			});
+
+		// --- Custom System Prompt ---
+		new Setting(containerEl)
+			.setName("Custom system prompt")
+			.setDesc("Override the default restructuring instructions (leave empty for default)")
+			.addTextArea((text) =>
+				text
+					.setPlaceholder("You are an expert note editor...")
+					.setValue(this.plugin.settings.customSystemPrompt)
+					.onChange(async (value) => {
+						this.plugin.settings.customSystemPrompt = value;
 						await this.plugin.saveSettings();
 					})
 			);
